@@ -42,7 +42,7 @@ def save_url(state, url, name=None, note='', group='기본'):
                 name = domain
             except:
                 name = url.split("//")[-1].split("/")[0] if "//" in url else url
-        state.saved_urls[url] = {"name": name, "active": True, "note": note, "group": group}
+        state.saved_urls[url] = {"name": name, "active": True, "note": note, "group": group, "favicon_path": None}
         state.save_saved_urls()
 
 def delete_history_item(state, query):

@@ -1,13 +1,46 @@
 
+import os
+import time
 from PyQt5.QtWidgets import (
     QFrame, QVBoxLayout, QLabel, QLineEdit, QPushButton, QHBoxLayout, 
     QTreeWidget, QTreeWidgetItem, QMenu, QSizePolicy, QDialog, QPlainTextEdit, QDialogButtonBox, QInputDialog
 )
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QColor, QFont
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
+from PyQt5.QtGui import QColor, QFont, QIcon
 import webbrowser
-from core import actions, settings
+from core import actions, settings, favicon_manager
 from .dialogs import EditUrlDialog, UrlGroupManageDialog
+
+
+class FaviconFetcher(QThread):
+    favicon_ready = pyqtSignal(str, str)
+
+    def __init__(self, state, parent=None):
+        super().__init__(parent)
+        self.state = state
+        self._is_running = True
+
+    def run(self):
+        # Create a copy of the items to avoid issues with concurrent modification
+        urls_to_fetch = list(self.state.saved_urls.items())
+        for url, data in urls_to_fetch:
+            if not self._is_running:
+                break
+
+            favicon_path = data.get("favicon_path")
+            if favicon_path and os.path.exists(favicon_path):
+                # If path exists, emit it so the UI can update
+                self.favicon_ready.emit(url, favicon_path)
+                continue
+
+            new_icon_path = favicon_manager.get_favicon(url)
+            if new_icon_path:
+                self.favicon_ready.emit(url, new_icon_path)
+
+            time.sleep(0.1) # Be a good citizen
+
+    def stop(self):
+        self._is_running = False
 
 class RightPanel(QFrame):
     def __init__(self, state, main_window):
@@ -16,6 +49,22 @@ class RightPanel(QFrame):
         self.main_window = main_window
         self.setFrameShape(QFrame.Box)
         self.init_ui()
+        self.start_favicon_fetcher()
+
+    def stop_threads(self):
+        if hasattr(self, 'favicon_fetcher') and self.favicon_fetcher.isRunning():
+            self.favicon_fetcher.stop()
+            self.favicon_fetcher.wait()
+
+    def on_favicon_ready(self, url, icon_path):
+        if url in self.state.saved_urls:
+            self.state.saved_urls[url]['favicon_path'] = icon_path
+            self.update_url_list_item(url, icon_path)
+
+    def start_favicon_fetcher(self):
+        self.favicon_fetcher = FaviconFetcher(self.state)
+        self.favicon_fetcher.favicon_ready.connect(self.on_favicon_ready)
+        self.favicon_fetcher.start()
 
     def init_ui(self):
         if self.layout() is not None:
@@ -204,6 +253,17 @@ class RightPanel(QFrame):
             self.state.save_url_check_presets(presets)
             button.setText(new_name)
 
+    def update_url_list_item(self, url, icon_path):
+        root = self.url_list.invisibleRootItem()
+        for i in range(root.childCount()):
+            group_item = root.child(i)
+            for j in range(group_item.childCount()):
+                child = group_item.child(j)
+                if child.text(1) == url:
+                    if os.path.exists(icon_path):
+                        child.setIcon(0, QIcon(icon_path))
+                    return
+
     def update_url_list(self):
         self.url_list.itemChanged.disconnect()
         self.url_list.clear()
@@ -234,6 +294,11 @@ class RightPanel(QFrame):
                 child = QTreeWidgetItem([name, url, note, "O" if active else "X"])
                 child.setFlags(child.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 child.setCheckState(0, Qt.CheckState.Checked if active else Qt.CheckState.Unchecked)
+
+                favicon_path = data.get('favicon_path')
+                if favicon_path and os.path.exists(favicon_path):
+                    child.setIcon(0, QIcon(favicon_path))
+
                 group_item.addChild(child)
             self.url_list.addTopLevelItem(group_item)
         self.url_list.itemChanged.connect(self.url_item_check_changed)
@@ -252,15 +317,28 @@ class RightPanel(QFrame):
         if selected_item and selected_item.parent(): # 그룹 아이템 제외
             edit_action = menu.addAction("수정")
             delete_action = menu.addAction("삭제")
+            refetch_icon_action = menu.addAction("아이콘 새로고침")
             edit_action.triggered.connect(lambda: self.edit_url_item(selected_item))
             delete_action.triggered.connect(lambda: self.delete_url_item(selected_item))
-        
+            refetch_icon_action.triggered.connect(lambda: self.refetch_icon(selected_item))
+
         edit_all_action = menu.addAction("전체 URL 편집")
         edit_all_action.triggered.connect(self.edit_all_urls_dialog)
         
         viewport = self.url_list.viewport()
         if viewport:
             menu.exec_(viewport.mapToGlobal(position))
+
+    def refetch_icon(self, item):
+        url = item.text(1)
+        if url in self.state.saved_urls:
+            # Remove old icon path and clear the icon in the UI
+            self.state.saved_urls[url].pop('favicon_path', None)
+            item.setIcon(0, QIcon()) # Clear icon
+            # Restart the fetcher to get the new icon
+            # A more targeted fetch would be better, but this is simpler
+            self.stop_threads()
+            self.start_favicon_fetcher()
 
     def edit_url_item(self, item):
         url_to_edit = item.text(1)
@@ -311,11 +389,15 @@ class RightPanel(QFrame):
                 parts = line.strip().split('|')
                 if len(parts) >= 1 and parts[0]:
                     url = parts[0]
-                    name = parts[1] if len(parts) > 1 else url.split('//')[-1].split('/')[0]
-                    note = parts[2] if len(parts) > 2 else ''
-                    group = parts[3] if len(parts) > 3 else '기본'
-                    active = self.state.saved_urls[url]["active"] if url in self.state.saved_urls else True
-                    new_urls[url] = {"name": name, "active": active, "note": note, "group": group}
+                    # Get existing data or create a new dictionary
+                    data = self.state.saved_urls.get(url, {"active": True, "favicon_path": None})
+
+                    # Update data from the line parts
+                    data['name'] = parts[1] if len(parts) > 1 and parts[1] else url.split('//')[-1].split('/')[0]
+                    data['note'] = parts[2] if len(parts) > 2 else ''
+                    data['group'] = parts[3] if len(parts) > 3 and parts[3] else '기본'
+
+                    new_urls[url] = data
             self.state.saved_urls = new_urls
             self.state.save_saved_urls()
             self.update_url_list()
