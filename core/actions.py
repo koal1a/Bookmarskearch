@@ -2,26 +2,24 @@
 import webbrowser
 from PyQt5.QtCore import Qt
 
-def search(state, query):
-    if query:
-        for url, data in state.saved_urls.items():
-            if data.get("active", True):
-                full_url = f"{url}{query}"
-                webbrowser.open(full_url)
-        save_search_query(state, query)
-
-def search_from_history(state, query):
+def _open_urls_for_query(state, query):
+    """Helper function to open all active URLs for a given query."""
     for url, data in state.saved_urls.items():
         if data.get("active", True):
             full_url = f"{url}{query}"
             webbrowser.open(full_url)
 
+def search(state, query):
+    if query:
+        _open_urls_for_query(state, query)
+        save_search_query(state, query)
+
+def search_from_history(state, query):
+    _open_urls_for_query(state, query)
+
 def search2(state, query):
     if query:
-        for url, data in state.saved_urls.items():
-            if data.get("active", True):
-                full_url = f"{url}{query}"
-                webbrowser.open(full_url)
+        _open_urls_for_query(state, query)
 
 def save_search_query(state, query, note=""):
     existing_query = next((item for item in state.search_history if item["query"] == query), None)
