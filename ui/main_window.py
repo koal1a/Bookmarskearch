@@ -136,6 +136,8 @@ class MainWindow(QMainWindow):
             self.splitter.setSizes([int(s) for s in splitter_sizes])
 
     def closeEvent(self, event):
+        # Stop background threads
+        self.right_panel.stop_threads()
         # 스플리터 상태 저장
         self.state.set_config_key("splitter_sizes", self.splitter.sizes())
         # 트리 펼침 상태 저장
